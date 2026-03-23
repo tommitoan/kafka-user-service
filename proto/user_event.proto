@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package com.example.user;
+
+option go_package = "github.com/example/user-kafka-go/proto";
+
+import "google/protobuf/timestamp.proto";
+
+enum EventType {
+  CREATED = 0;
+  UPDATED = 1;
+  DELETED = 2;
+}
+
+message UserEvent {
+  EventType event_type = 1;
+  string user_id       = 2;
+  string name          = 3;
+  string email         = 4;
+  int32  age           = 5;
+  google.protobuf.Timestamp timestamp = 6;
+}
