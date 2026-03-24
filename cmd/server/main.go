@@ -99,14 +99,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	avroHandler := kafka.NewIdempotentHandler(database, kafka.LoggingHandler("avro"))
+	protoHandler := kafka.NewIdempotentHandler(database, kafka.LoggingHandler("proto"))
+
 	go func() {
-		if err := consumer.StartAvro(ctx, kafka.LoggingHandler("avro")); err != nil {
+		if err := consumer.StartAvro(ctx, avroHandler); err != nil {
 			log.Printf("[Consumer] Avro stopped: %v", err)
 		}
 	}()
 
 	go func() {
-		if err := consumer.StartProto(ctx, kafka.LoggingHandler("proto")); err != nil {
+		if err := consumer.StartProto(ctx, protoHandler); err != nil {
 			log.Printf("[Consumer] Proto stopped: %v", err)
 		}
 	}()

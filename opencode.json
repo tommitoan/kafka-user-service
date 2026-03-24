@@ -1,9 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "instructions": [
-    "docs/orchestrator/08-orchestrator-handoff.md",
-    "docs/orchestrator/03-implementation-order.md"
-  ],
   "permission": {
     "read": {
       "*": "allow",
@@ -11,25 +7,104 @@
       "*.env.*": "deny",
       "*.env.example": "allow"
     },
-    "edit": "ask",
+    "list": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "task": "allow",
+    "edit": {
+      "*": "ask",
+      "cmd/*": "allow",
+      "internal/*": "allow",
+      "test/*": "allow",
+      "docs/*": "allow",
+      "README.md": "allow",
+      ".git/*": "deny",
+      "migrations/*": "ask",
+      "go.mod": "ask",
+      "go.sum": "ask",
+      "docker-compose.yml": "ask",
+      "config.yaml": "ask",
+      "schemas/*": "ask",
+      "proto/*": "ask",
+      "AGENTS.md": "ask",
+      "opencode.json": "ask",
+      ".opencode/*": "ask"
+    },
     "bash": {
       "*": "ask",
+      "pwd*": "allow",
+      "export *": "allow",
+      "ls*": "allow",
+      "find *": "allow",
+      "rg *": "allow",
+      "grep *": "allow",
+      "sed *": "allow",
+      "head *": "allow",
+      "tail *": "allow",
+      "cat *": "allow",
       "git status*": "allow",
       "git diff*": "allow",
       "git log*": "allow",
-      "rg *": "allow",
-      "grep *": "allow",
-      "find *": "allow",
+      "git branch*": "allow",
+      "git show*": "allow",
+      "git rev-parse*": "allow",
+      "git add*": "ask",
+      "git commit*": "ask",
+      "git pull*": "ask",
+      "git rebase*": "ask",
+      "git rm*": "ask",
+      "git push*": "deny",
+      "git reset*": "deny",
+      "git clean*": "deny",
       "go test*": "allow",
-      "docker compose ps*": "allow"
+      "go build*": "allow",
+      "go vet*": "allow",
+      "go fmt*": "allow",
+      "go mod tidy*": "allow",
+      "go mod download*": "allow",
+      "make test*": "allow",
+      "make build*": "allow",
+      "docker compose ps*": "allow",
+      "docker compose logs*": "allow",
+      "docker compose config*": "allow",
+      "docker compose up*": "ask",
+      "docker compose down*": "ask",
+      "docker compose restart*": "ask",
+      "rm *": "ask",
+      "sudo *": "ask",
+      "curl *": "ask",
+      "wget *": "ask"
     }
   },
   "agent": {
     "plan": {
-      "mode": "primary"
+      "permission": {
+        "edit": "deny",
+        "bash": "ask"
+      }
     },
     "build": {
-      "mode": "primary"
+      "permission": {
+        "edit": {
+          "*": "ask",
+          "cmd/*": "allow",
+          "internal/*": "allow",
+          "test/*": "allow",
+          "docs/*": "allow",
+          "README.md": "allow",
+          ".git/*": "deny",
+          "migrations/*": "ask",
+          "go.mod": "ask",
+          "go.sum": "ask",
+          "docker-compose.yml": "ask",
+          "config.yaml": "ask",
+          "schemas/*": "ask",
+          "proto/*": "ask",
+          "AGENTS.md": "ask",
+          "opencode.json": "ask",
+          ".opencode/*": "ask"
+        }
+      }
     }
   }
 }

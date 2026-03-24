@@ -18,8 +18,19 @@ import (
 	pb "kafka-user-service/proto"
 )
 
-// EventHandler is called for each consumed user event
-type EventHandler func(ctx context.Context, event *models.UserEvent) error
+// MessageMeta carries Kafka message metadata into the handler.
+// The idempotent handler uses ConsumerGroup + Topic + event_id as the dedup key.
+// Partition and Offset are stored in processed_events for observability only.
+type MessageMeta struct {
+	Topic         string
+	Partition     int
+	Offset        int64
+	ConsumerGroup string
+}
+
+// EventHandler is called for each consumed user event.
+// meta contains the Kafka routing context needed for idempotency checks.
+type EventHandler func(ctx context.Context, meta MessageMeta, event *models.UserEvent) error
 
 //go:generate mockery --name=Consumer --output=../mocks --outpkg=mocks
 type Consumer interface {
@@ -131,7 +142,14 @@ func (c *consumer) StartAvro(ctx context.Context, handler EventHandler) error {
 			continue
 		}
 
-		if err := handler(ctx, event); err != nil {
+		meta := MessageMeta{
+			Topic:         msg.Topic,
+			Partition:     msg.Partition,
+			Offset:        msg.Offset,
+			ConsumerGroup: c.avroGroupID,
+		}
+
+		if err := handler(ctx, meta, event); err != nil {
 			slog.Error("kafka handler error",
 				"format", "avro",
 				"group", c.avroGroupID,
@@ -233,7 +251,14 @@ func (c *consumer) StartProto(ctx context.Context, handler EventHandler) error {
 			continue
 		}
 
-		if err := handler(ctx, event); err != nil {
+		meta := MessageMeta{
+			Topic:         msg.Topic,
+			Partition:     msg.Partition,
+			Offset:        msg.Offset,
+			ConsumerGroup: c.protoGroupID,
+		}
+
+		if err := handler(ctx, meta, event); err != nil {
 			slog.Error("kafka handler error",
 				"format", "proto",
 				"group", c.protoGroupID,
@@ -312,7 +337,11 @@ func (c *consumer) deserializeAvro(data []byte) (*models.UserEvent, error) {
 		age = v
 	}
 
+	// event_id has a default of "" for backward compatibility with old messages
+	eventID, _ := native["event_id"].(string)
+
 	return &models.UserEvent{
+		EventID:   eventID,
 		EventType: native["event_type"].(string),
 		UserID:    native["user_id"].(string),
 		Name:      native["name"].(string),
@@ -337,6 +366,7 @@ func (c *consumer) deserializeProto(data []byte) (*models.UserEvent, error) {
 	}
 
 	return &models.UserEvent{
+		EventID:   pbEvent.EventId,
 		EventType: pbEvent.EventType.String(),
 		UserID:    pbEvent.UserId,
 		Name:      pbEvent.Name,
@@ -350,11 +380,18 @@ func (c *consumer) Close() error {
 	return errors.Join(c.avroReader.Close(), c.protoReader.Close())
 }
 
-// LoggingHandler is a simple event handler that logs consumed events
+// LoggingHandler is a simple event handler that logs consumed events.
 func LoggingHandler(format string) EventHandler {
-	return func(ctx context.Context, event *models.UserEvent) error {
+	return func(ctx context.Context, meta MessageMeta, event *models.UserEvent) error {
 		b, _ := json.MarshalIndent(event, "", "  ")
-		slog.Info("kafka event received", "format", format, "event", string(b))
+		slog.Info("kafka event received",
+			"format", format,
+			"group", meta.ConsumerGroup,
+			"topic", meta.Topic,
+			"partition", meta.Partition,
+			"offset", meta.Offset,
+			"event", string(b),
+		)
 		return nil
 	}
 }

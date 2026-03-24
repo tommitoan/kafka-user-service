@@ -38,6 +38,8 @@ func NewProducer(brokers []string, schemaRegistryURL string) (Producer, error) {
 	srClient := srclient.CreateSchemaRegistryClient(schemaRegistryURL)
 
 	// Register Avro schema
+	// event_id is appended last with a default of "" for backward compatibility
+	// with any messages produced before this field was added.
 	avroSchemaStr := `{
 		"type": "record",
 		"name": "UserEvent",
@@ -48,7 +50,8 @@ func NewProducer(brokers []string, schemaRegistryURL string) (Producer, error) {
 			{"name": "name",       "type": "string"},
 			{"name": "email",      "type": "string"},
 			{"name": "age",        "type": "int"},
-			{"name": "timestamp",  "type": {"type": "long", "logicalType": "timestamp-millis"}}
+			{"name": "timestamp",  "type": {"type": "long", "logicalType": "timestamp-millis"}},
+			{"name": "event_id",   "type": "string", "default": ""}
 		]
 	}`
 
@@ -65,6 +68,7 @@ enum EventType { CREATED = 0; UPDATED = 1; DELETED = 2; }
 message UserEvent {
   EventType event_type = 1; string user_id = 2; string name = 3;
   string email = 4; int32 age = 5; google.protobuf.Timestamp timestamp = 6;
+  string event_id = 7;
 }`
 
 	protoSch, err := srClient.CreateSchema(TopicUserEventsProto+"-value", protoSchemaStr, srclient.Protobuf)
@@ -141,6 +145,7 @@ func (p *producer) serializeAvro(event *models.UserEvent) ([]byte, error) {
 		"email":      event.Email,
 		"age":        event.Age,
 		"timestamp":  event.Timestamp.UnixMilli(),
+		"event_id":   event.EventID,
 	}
 
 	avroBytes, err := avro.Marshal(p.avroSchema, native)
@@ -175,6 +180,7 @@ func (p *producer) serializeProto(event *models.UserEvent) ([]byte, error) {
 		Email:     event.Email,
 		Age:       event.Age,
 		Timestamp: event.Timestamp,
+		EventId:   event.EventID,
 	}
 
 	jsonBytes, err := json.Marshal(pbEvent)

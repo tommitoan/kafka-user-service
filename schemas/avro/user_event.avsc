@@ -8,6 +8,7 @@
     {"name": "name",       "type": "string"},
     {"name": "email",      "type": "string"},
     {"name": "age",        "type": "int"},
-    {"name": "timestamp",  "type": {"type": "long", "logicalType": "timestamp-millis"}}
+    {"name": "timestamp",  "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "event_id",   "type": "string", "default": ""}
   ]
 }

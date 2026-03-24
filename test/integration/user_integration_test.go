@@ -8,7 +8,6 @@ package integration
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -82,7 +81,7 @@ func (s *IntegrationSuite) TearDownSuite() {
 func (s *IntegrationSuite) SetupTest() {
 	s.producer = &mocks.MockProducer{}
 	s.setupRouter()
-	s.gormDB.Exec("TRUNCATE TABLE users RESTART IDENTITY CASCADE")
+	s.gormDB.Exec("TRUNCATE TABLE users, processed_events RESTART IDENTITY CASCADE")
 }
 
 func (s *IntegrationSuite) setupRouter() {
@@ -318,6 +317,7 @@ func (s *IntegrationSuite) TestCreateUser_EventPayload() {
 	assert.Equal(s.T(), 27, capturedEvent.Age)
 	assert.WithinDuration(s.T(), time.Now(), capturedEvent.Timestamp, 5*time.Second)
 	assert.NotEmpty(s.T(), capturedEvent.UserID)
+	assert.NotEmpty(s.T(), capturedEvent.EventID) // event_id must be set by the producer
 
 	s.producer.AssertExpectations(s.T())
 }

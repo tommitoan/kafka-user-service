@@ -143,6 +143,7 @@ func (s *userService) Delete(ctx context.Context, id uuid.UUID) error {
 
 func (s *userService) publishEvent(ctx context.Context, user *models.User, evtType models.EventType) {
 	event := &models.UserEvent{
+		EventID:   uuid.New().String(), // generated once; stable across at-least-once redelivery
 		EventType: string(evtType),
 		UserID:    user.ID.String(),
 		Name:      user.Name,

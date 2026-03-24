@@ -39,5 +39,5 @@ func New(cfg Config) (*gorm.DB, error) {
 
 // AutoMigrate runs GORM auto-migration (use go-migrate for production)
 func AutoMigrate(db *gorm.DB) error {
-	return db.AutoMigrate(&models.User{})
+	return db.AutoMigrate(&models.User{}, &models.ProcessedEvent{})
 }
