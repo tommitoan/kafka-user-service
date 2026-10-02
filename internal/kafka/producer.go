@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/hamba/avro/v2"
 	"github.com/riferrei/srclient"
@@ -65,6 +66,9 @@ func newWriter(brokers []string, topic string) *kafkago.Writer {
 		Topic:        topic,
 		Balancer:     &kafkago.Hash{}, // same user -> same partition -> per-user ordering
 		RequiredAcks: kafkago.RequireAll,
+		// One event per request: do not wait for a batch to fill (the default
+		// BatchTimeout of 1s would add a second to every publish).
+		BatchTimeout: 10 * time.Millisecond,
 	}
 }
 
