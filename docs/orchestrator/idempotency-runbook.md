@@ -60,7 +60,7 @@ broker re-delivers the same message.
 docker compose up -d
 
 # 2. Create a user and note the event_id in the logs (look for "kafka event received")
-curl -s -X POST http://localhost:8080/api/v1/users \
+curl -s -X POST http://localhost:8085/api/v1/users \
   -H "Content-Type: application/json" \
   -d '{"name":"Alice","email":"alice@example.com","age":30}'
 

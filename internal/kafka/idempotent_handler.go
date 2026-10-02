@@ -6,8 +6,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"kafka-user-service/internal/models"
-	"kafka-user-service/internal/repository"
+	"github.com/tommitoan/kafka-user-service/internal/models"
+	"github.com/tommitoan/kafka-user-service/internal/repository"
 )
 
 // NewIdempotentHandler wraps an inner EventHandler with consumer-side deduplication.

@@ -1,9 +1,10 @@
 package kafka
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -28,7 +29,7 @@ type TopicDefinition struct {
 // Safe to call on every startup.
 func EnsureTopics(brokers []string, topics []TopicDefinition) error {
 	if len(topics) == 0 {
-		log.Println("[Kafka] No topics declared in config — skipping")
+		slog.Info("no kafka topics declared in config, skipping creation")
 		return nil
 	}
 
@@ -55,14 +56,14 @@ func EnsureTopics(brokers []string, topics []TopicDefinition) error {
 	existingTopics, err := existingTopicSet(conn)
 	if err != nil {
 		// Non-fatal — just attempt to create all and ignore already-exists errors
-		log.Printf("[Kafka] Could not list existing topics: %v — will attempt create anyway", err)
+		slog.Warn("could not list existing kafka topics, attempting create anyway", "error", err)
 		existingTopics = map[string]struct{}{}
 	}
 
 	var toCreate []kafkago.TopicConfig
 	for _, t := range topics {
 		if _, exists := existingTopics[t.Name]; exists {
-			log.Printf("[Kafka] Topic already exists: %s", t.Name)
+			slog.Info("kafka topic already exists", "topic", t.Name)
 			continue
 		}
 		toCreate = append(toCreate, kafkago.TopicConfig{
@@ -78,8 +79,8 @@ func EnsureTopics(brokers []string, topics []TopicDefinition) error {
 			return fmt.Errorf("create topics: %w", err)
 		}
 		for _, t := range toCreate {
-			log.Printf("[Kafka] Topic created: %s (partitions=%d, replication=%d)",
-				t.Topic, t.NumPartitions, t.ReplicationFactor)
+			slog.Info("kafka topic created",
+				"topic", t.Topic, "partitions", t.NumPartitions, "replication", t.ReplicationFactor)
 		}
 	}
 
@@ -105,7 +106,7 @@ func isIgnorableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())

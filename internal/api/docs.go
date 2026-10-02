@@ -5,7 +5,7 @@
 // @title           User Kafka Go API
 // @version         1.0
 // @description     CRUD API for users with dual-format Kafka event publishing (Avro + Protobuf).
-// @host            localhost:8080
+// @host            localhost:8085
 // @BasePath        /api/v1
 // @schemes         http
 package api

@@ -1,0 +1,13 @@
+# build output
+/bin/
+*.test
+coverage.out
+
+# local config / secrets
+.env
+.env.*
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

@@ -6,7 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 
-	"kafka-user-service/internal/models"
+	"github.com/tommitoan/kafka-user-service/internal/models"
 )
 
 type MockUserRepository struct {

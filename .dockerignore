@@ -1,0 +1,8 @@
+.git
+.github
+.opencode
+.agents
+bin
+docs/orchestrator
+*.md
+!README.md

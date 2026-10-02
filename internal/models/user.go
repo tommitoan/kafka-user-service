@@ -10,7 +10,7 @@ import (
 type User struct {
 	ID        uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	Name      string         `gorm:"not null" json:"name"`
-	Email     string         `gorm:"uniqueIndex;not null" json:"email"`
+	Email     string         `gorm:"uniqueIndex:uq_users_email_active,where:deleted_at IS NULL;not null" json:"email"`
 	Age       int            `json:"age"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

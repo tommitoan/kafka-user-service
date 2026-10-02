@@ -4,7 +4,7 @@ services:
     hostname: broker
     container_name: broker
     ports:
-      - "9092:9092"
+      - "${KAFKA_PORT:-9092}:9092"
     environment:
       # KRaft — no Zookeeper needed
       KAFKA_NODE_ID: 1
@@ -40,18 +40,24 @@ services:
       broker:
         condition: service_healthy
     ports:
-      - "8081:8081"
+      - "${SCHEMA_REGISTRY_PORT:-8081}:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker:29092
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+    image: provectuslabs/kafka-ui:v0.7.2
     hostname: kafka-ui
     container_name: kafka-ui
     ports:
-      - "9090:9090"
+      - "${KAFKA_UI_PORT:-9090}:9090"
     depends_on:
       broker:
         condition: service_healthy
@@ -66,7 +72,7 @@ services:
     image: postgres:16-alpine
     container_name: postgres
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -78,6 +84,25 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # The service itself. Opt-in so `docker compose up` still starts only the
+  # infrastructure for `go run`; start everything with `--profile app`.
+  app:
+    profiles: ["app"]
+    build: .
+    ports:
+      - "${APP_PORT:-8085}:8085"
+    depends_on:
+      broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_DATABASE_HOST: postgres
+      APP_KAFKA_BROKERS: broker:29092
+      APP_KAFKA_SCHEMA_REGISTRY: http://schema-registry:8081
 
 volumes:
   postgres_data:

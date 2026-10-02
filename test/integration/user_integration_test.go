@@ -21,16 +21,15 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"kafka-user-service/internal/api"
-	"kafka-user-service/internal/db"
-	"kafka-user-service/internal/mocks"
-	"kafka-user-service/internal/models"
-	"kafka-user-service/internal/repository"
-	"kafka-user-service/internal/service"
+	"github.com/tommitoan/kafka-user-service/internal/api"
+	"github.com/tommitoan/kafka-user-service/internal/db"
+	"github.com/tommitoan/kafka-user-service/internal/mocks"
+	"github.com/tommitoan/kafka-user-service/internal/models"
+	"github.com/tommitoan/kafka-user-service/internal/repository"
+	"github.com/tommitoan/kafka-user-service/internal/service"
 )
 
 // IntegrationSuite uses embedded Postgres + mock Kafka producer.
@@ -57,9 +56,7 @@ func (s *IntegrationSuite) SetupSuite() {
 	require.NoError(s.T(), s.pg.Start())
 
 	dsn := "host=localhost port=15432 user=postgres password=postgres dbname=userdb sslmode=disable"
-	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
+	gormDB, err := db.Open(dsn, logger.Silent)
 	require.NoError(s.T(), err)
 	s.gormDB = gormDB
 
@@ -161,7 +158,7 @@ func (s *IntegrationSuite) TestCreateUser_DuplicateEmail() {
 
 	// Second create with same email — no event should fire
 	w := s.post("/api/v1/users", map[string]any{"name": "Alice2", "email": "dup@example.com", "age": 26})
-	assert.Equal(s.T(), http.StatusInternalServerError, w.Code)
+	assert.Equal(s.T(), http.StatusConflict, w.Code)
 
 	s.producer.AssertExpectations(s.T())
 }

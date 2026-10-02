@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
-	"kafka-user-service/internal/models"
+	"github.com/tommitoan/kafka-user-service/internal/models"
 )
 
 type MockProducer struct {

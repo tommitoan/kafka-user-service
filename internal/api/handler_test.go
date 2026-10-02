@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,9 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	"kafka-user-service/internal/api"
-	"kafka-user-service/internal/models"
-	"kafka-user-service/internal/service"
+	"github.com/tommitoan/kafka-user-service/internal/api"
+	"github.com/tommitoan/kafka-user-service/internal/models"
+	"github.com/tommitoan/kafka-user-service/internal/service"
 )
 
 func init() {
@@ -237,4 +238,85 @@ func TestDeleteUser_404(t *testing.T) {
 
 	setupRouter(svc).ServeHTTP(w, req)
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// ── Error mapping ─────────────────────────────────────────────────────────────
+
+func TestCreateUser_409_EmailTaken(t *testing.T) {
+	svc := &mockUserService{}
+	svc.On("Create", mock.Anything, mock.Anything).Return(nil, service.ErrEmailTaken)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/users", toJSON(t, map[string]any{
+		"name": "Alice", "email": "alice@example.com", "age": 30,
+	}))
+	req.Header.Set("Content-Type", "application/json")
+
+	setupRouter(svc).ServeHTTP(w, req)
+	assert.Equal(t, http.StatusConflict, w.Code)
+}
+
+func TestUpdateUser_409_EmailTaken(t *testing.T) {
+	svc := &mockUserService{}
+	id := uuid.New()
+	svc.On("Update", mock.Anything, id, mock.Anything).Return(nil, service.ErrEmailTaken)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPut, "/api/v1/users/"+id.String(), toJSON(t, map[string]any{"email": "x@example.com"}))
+	req.Header.Set("Content-Type", "application/json")
+
+	setupRouter(svc).ServeHTTP(w, req)
+	assert.Equal(t, http.StatusConflict, w.Code)
+}
+
+// Internal error text (driver messages, SQL) must never be echoed to the client.
+func TestInternalErrorsAreNotLeaked(t *testing.T) {
+	svc := &mockUserService{}
+	id := uuid.New()
+	svc.On("GetByID", mock.Anything, id).Return(nil, errors.New(`pq: relation "users" does not exist`))
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/users/"+id.String(), nil)
+
+	setupRouter(svc).ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.NotContains(t, w.Body.String(), "relation")
+}
+
+func TestListUsers_400_InvalidPagination(t *testing.T) {
+	for _, q := range []string{"?offset=abc", "?limit=xyz"} {
+		svc := &mockUserService{}
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/users"+q, nil)
+
+		setupRouter(svc).ServeHTTP(w, req)
+		assert.Equal(t, http.StatusBadRequest, w.Code, q)
+		svc.AssertNotCalled(t, "List")
+	}
+}
+
+func TestDeleteUser_204_HasEmptyBody(t *testing.T) {
+	svc := &mockUserService{}
+	id := uuid.New()
+	svc.On("Delete", mock.Anything, id).Return(nil)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodDelete, "/api/v1/users/"+id.String(), nil)
+
+	setupRouter(svc).ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Empty(t, w.Body.String())
+}
+
+func TestUpdateUser_400_EmptyName(t *testing.T) {
+	svc := &mockUserService{}
+	id := uuid.New()
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPut, "/api/v1/users/"+id.String(), toJSON(t, map[string]any{"name": ""}))
+	req.Header.Set("Content-Type", "application/json")
+
+	setupRouter(svc).ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	svc.AssertNotCalled(t, "Update")
 }

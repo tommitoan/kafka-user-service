@@ -2,141 +2,139 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
+	"gorm.io/gorm/logger"
 
-	"kafka-user-service/docs"
-	"kafka-user-service/internal/api"
-	"kafka-user-service/internal/config"
-	"kafka-user-service/internal/db"
-	"kafka-user-service/internal/kafka"
-	"kafka-user-service/internal/repository"
-	"kafka-user-service/internal/service"
+	"github.com/tommitoan/kafka-user-service/docs"
+	"github.com/tommitoan/kafka-user-service/internal/api"
+	"github.com/tommitoan/kafka-user-service/internal/config"
+	"github.com/tommitoan/kafka-user-service/internal/db"
+	"github.com/tommitoan/kafka-user-service/internal/kafka"
+	"github.com/tommitoan/kafka-user-service/internal/repository"
+	"github.com/tommitoan/kafka-user-service/internal/service"
 )
 
+const shutdownTimeout = 10 * time.Second
+
 func main() {
+	if err := run(); err != nil {
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := config.Load(".")
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	// ── Database ──────────────────────────────────────────────────────────────
-	database, err := db.New(db.Config{
-		Host:     cfg.Database.Host,
-		Port:     cfg.Database.Port,
-		User:     cfg.Database.User,
-		Password: cfg.Database.Password,
-		DBName:   cfg.Database.Name,
-		SSLMode:  cfg.Database.SSLMode,
-	})
+	database, err := db.Open(cfg.Database.DSN(), logger.Warn)
 	if err != nil {
-		log.Fatalf("connect db: %v", err)
+		return fmt.Errorf("connect db: %w", err)
 	}
-
 	if err := db.RunMigrations(cfg.Database.MigrateURL(), "./migrations"); err != nil {
-		log.Fatalf("run migrations: %v", err)
+		return fmt.Errorf("run migrations: %w", err)
 	}
 
-	// ── Kafka topics ────────────────────────────────────────────────────────────
-	// Convert config topic definitions → kafka.TopicDefinition
-	kafkaTopics := make([]kafka.TopicDefinition, len(cfg.Kafka.Topics))
+	// ── Kafka ─────────────────────────────────────────────────────────────────
+	topics := make([]kafka.TopicDefinition, len(cfg.Kafka.Topics))
 	for i, t := range cfg.Kafka.Topics {
-		kafkaTopics[i] = kafka.TopicDefinition{
+		topics[i] = kafka.TopicDefinition{
 			Name:              t.Name,
 			NumPartitions:     t.NumPartitions,
 			ReplicationFactor: t.ReplicationFactor,
 		}
 	}
-	if err := kafka.EnsureTopics(cfg.Kafka.Brokers, kafkaTopics); err != nil {
-		log.Fatalf("ensure kafka topics: %v", err)
+	if err := kafka.EnsureTopics(cfg.Kafka.Brokers, topics); err != nil {
+		return fmt.Errorf("ensure kafka topics: %w", err)
 	}
 
-	// ── Kafka ─────────────────────────────────────────────────────────────────
 	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SchemaRegistry)
 	if err != nil {
-		log.Fatalf("create producer: %v", err)
+		return fmt.Errorf("create producer: %w", err)
 	}
 	defer producer.Close()
 
 	consumer := kafka.NewConsumer(cfg.Kafka.Brokers, cfg.Kafka.GroupID, cfg.Kafka.SchemaRegistry)
 	defer consumer.Close()
 
-	// ── Wiring ────────────────────────────────────────────────────────────────
-	userRepo := repository.NewUserRepository(database)
-	userSvc := service.NewUserService(userRepo, producer)
-	userHandler := api.NewUserHandler(userSvc)
+	// ── HTTP ──────────────────────────────────────────────────────────────────
+	userSvc := service.NewUserService(repository.NewUserRepository(database), producer)
 
-	// ── Swagger host (reflects actual configured port) ──────────────────────────
 	docs.SwaggerInfo.Host = fmt.Sprintf("localhost:%d", cfg.Server.Port)
 
-	// ── HTTP server ───────────────────────────────────────────────────────────
 	router := gin.Default()
-
-	// Web UI at /
 	api.RegisterUI(router)
-
-	// Swagger at /swagger/index.html
 	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-
-	// REST API
-	userHandler.RegisterRoutes(router)
+	api.NewUserHandler(userSvc).RegisterRoutes(router)
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port),
-		Handler: router,
+		Addr:              fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// ── Consumers (background) ────────────────────────────────────────────────
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// ── Consumers ─────────────────────────────────────────────────────────────
+	// Each handler dedupes on (consumer_group, topic, event_id) before logging.
+	var wg sync.WaitGroup
+	startConsumer := func(name string, start func(context.Context, kafka.EventHandler) error) {
+		handler := kafka.NewIdempotentHandler(database, kafka.LoggingHandler(name))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := start(ctx, handler); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Error("consumer stopped", "format", name, "error", err)
+			}
+		}()
+	}
+	startConsumer("avro", consumer.StartAvro)
+	startConsumer("proto", consumer.StartProto)
+
+	// ── Serve until a signal arrives or the listener fails ────────────────────
+	serveErr := make(chan error, 1)
+	go func() {
+		slog.Info("server listening",
+			"addr", srv.Addr,
+			"ui", fmt.Sprintf("http://localhost:%d/", cfg.Server.Port),
+			"swagger", fmt.Sprintf("http://localhost:%d/swagger/index.html", cfg.Server.Port),
+		)
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+		}
+	}()
+
+	select {
+	case err := <-serveErr:
+		stop()
+		wg.Wait()
+		return fmt.Errorf("listen: %w", err)
+	case <-ctx.Done():
+	}
+
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-
-	avroHandler := kafka.NewIdempotentHandler(database, kafka.LoggingHandler("avro"))
-	protoHandler := kafka.NewIdempotentHandler(database, kafka.LoggingHandler("proto"))
-
-	go func() {
-		if err := consumer.StartAvro(ctx, avroHandler); err != nil {
-			log.Printf("[Consumer] Avro stopped: %v", err)
-		}
-	}()
-
-	go func() {
-		if err := consumer.StartProto(ctx, protoHandler); err != nil {
-			log.Printf("[Consumer] Proto stopped: %v", err)
-		}
-	}()
-
-	// ── Graceful shutdown ─────────────────────────────────────────────────────
-	go func() {
-		log.Printf("Server listening on %s", srv.Addr)
-		log.Printf("Web UI:  http://localhost:%d/", cfg.Server.Port)
-		log.Printf("Swagger: http://localhost:%d/swagger/index.html", cfg.Server.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
-		}
-	}()
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Println("Shutting down...")
-	cancel()
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("server shutdown: %v", err)
+		return fmt.Errorf("server shutdown: %w", err)
 	}
-
-	log.Println("Server exited")
+	wg.Wait() // let in-flight handlers finish before the reader and DB are closed
+	slog.Info("server exited")
+	return nil
 }

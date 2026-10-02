@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"kafka-user-service/internal/config"
+	"github.com/tommitoan/kafka-user-service/internal/config"
 )
 
 func TestLoad_Defaults(t *testing.T) {
@@ -16,7 +16,7 @@ func TestLoad_Defaults(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "0.0.0.0", cfg.Server.Host)
-	assert.Equal(t, 8080, cfg.Server.Port)
+	assert.Equal(t, 8085, cfg.Server.Port)
 	assert.Equal(t, "localhost", cfg.Database.Host)
 	assert.Equal(t, 5432, cfg.Database.Port)
 	assert.Equal(t, "disable", cfg.Database.SSLMode)
@@ -72,4 +72,11 @@ func TestDatabaseConfig_DSN(t *testing.T) {
 	}
 	assert.Equal(t, "host=localhost port=5432 user=u password=p dbname=db sslmode=disable", cfg.DSN())
 	assert.Equal(t, "postgres://u:p@localhost:5432/db?sslmode=disable", cfg.MigrateURL())
+}
+
+func TestDatabaseConfig_MigrateURL_EscapesCredentials(t *testing.T) {
+	cfg := config.DatabaseConfig{
+		Host: "db", Port: 5432, User: "app", Password: "p@ss/w:rd?", Name: "users", SSLMode: "require",
+	}
+	assert.Equal(t, "postgres://app:p%40ss%2Fw%3Ard%3F@db:5432/users?sslmode=require", cfg.MigrateURL())
 }

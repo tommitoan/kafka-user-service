@@ -34,7 +34,7 @@ go run ./cmd/server/...  2>&1 | tee /tmp/svc.log
 1. Start the service.
 2. Create a user:
    ```
-   curl -s -X POST http://localhost:8080/users \
+   curl -s -X POST http://localhost:8085/api/v1/users \
      -H 'Content-Type: application/json' \
      -d '{"name":"Alice","email":"alice@example.com","age":30}'
    ```

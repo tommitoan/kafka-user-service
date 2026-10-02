@@ -6,15 +6,13 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"kafka-user-service/internal/models"
+	"github.com/tommitoan/kafka-user-service/internal/models"
 )
 
 // ProcessedEventRepository persists deduplication markers for consumed Kafka events.
 // The uniqueness contract is (consumer_group, topic, event_id): the same logical
 // event published to both the Avro and Proto topics is handled independently by
 // each consumer group, so neither flow blocks the other.
-//
-//go:generate mockery --name=ProcessedEventRepository --output=../mocks --outpkg=mocks
 type ProcessedEventRepository interface {
 	// RecordIfNotExists inserts a processed_events row.
 	//

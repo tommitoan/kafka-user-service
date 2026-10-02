@@ -2,20 +2,15 @@ package kafka
 
 import (
 	"context"
-	"encoding/binary"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"time"
 
-	"github.com/hamba/avro/v2"
 	"github.com/riferrei/srclient"
 	kafkago "github.com/segmentio/kafka-go"
 
-	"kafka-user-service/internal/models"
-	pb "kafka-user-service/proto"
+	"github.com/tommitoan/kafka-user-service/internal/models"
 )
 
 // MessageMeta carries Kafka message metadata into the handler.
@@ -32,365 +27,166 @@ type MessageMeta struct {
 // meta contains the Kafka routing context needed for idempotency checks.
 type EventHandler func(ctx context.Context, meta MessageMeta, event *models.UserEvent) error
 
-//go:generate mockery --name=Consumer --output=../mocks --outpkg=mocks
 type Consumer interface {
 	StartAvro(ctx context.Context, handler EventHandler) error
 	StartProto(ctx context.Context, handler EventHandler) error
 	Close() error
 }
 
-type consumer struct {
-	avroReader   *kafkago.Reader
-	protoReader  *kafkago.Reader
-	avroGroupID  string
-	protoGroupID string
-	schemaClient srclient.ISchemaRegistryClient
+const retryBackoff = time.Second
+
+// messageReader is the subset of *kafkago.Reader the consume loop needs.
+type messageReader interface {
+	FetchMessage(ctx context.Context) (kafkago.Message, error)
+	CommitMessages(ctx context.Context, msgs ...kafkago.Message) error
+	Close() error
 }
 
+type decodeFunc func(data []byte) (*models.UserEvent, error)
+
+// topicConsumer runs the fetch -> decode -> handle -> commit loop for one topic.
+type topicConsumer struct {
+	format  string
+	groupID string
+	reader  messageReader
+	decode  decodeFunc
+	backoff time.Duration
+}
+
+type consumer struct {
+	avro  *topicConsumer
+	proto *topicConsumer
+}
+
+// NewConsumer creates one consumer group per topic: "<groupID>-avro" and
+// "<groupID>-proto". Offsets are committed manually, only after the handler succeeds.
 func NewConsumer(brokers []string, groupID, schemaRegistryURL string) Consumer {
-	avroGroupID := groupID + "-avro"
-	protoGroupID := groupID + "-proto"
-
-	avroReader := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers:        brokers,
-		Topic:          TopicUserEventsAvro,
-		GroupID:        avroGroupID,
-		MinBytes:       1,
-		MaxBytes:       10e6,
-		MaxWait:        1 * time.Second,
-		CommitInterval: 0, // disable background auto-commit; offsets are committed manually after handler success
-	})
-
-	protoReader := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers:        brokers,
-		Topic:          TopicUserEventsProto,
-		GroupID:        protoGroupID,
-		MinBytes:       1,
-		MaxBytes:       10e6,
-		MaxWait:        1 * time.Second,
-		CommitInterval: 0, // disable background auto-commit; offsets are committed manually after handler success
-	})
-
-	srClient := srclient.CreateSchemaRegistryClient(schemaRegistryURL)
+	codec := newAvroCodec(srclient.CreateSchemaRegistryClient(schemaRegistryURL))
 
 	return &consumer{
-		avroReader:   avroReader,
-		protoReader:  protoReader,
-		avroGroupID:  avroGroupID,
-		protoGroupID: protoGroupID,
-		schemaClient: srClient,
+		avro: &topicConsumer{
+			format:  "avro",
+			groupID: groupID + "-avro",
+			reader:  newReader(brokers, groupID+"-avro", TopicUserEventsAvro),
+			decode:  codec.decode,
+			backoff: retryBackoff,
+		},
+		proto: &topicConsumer{
+			format:  "proto",
+			groupID: groupID + "-proto",
+			reader:  newReader(brokers, groupID+"-proto", TopicUserEventsProto),
+			decode:  protoCodec{}.decode,
+			backoff: retryBackoff,
+		},
 	}
 }
 
-func (c *consumer) StartAvro(ctx context.Context, handler EventHandler) error {
-	slog.Info("kafka consumer starting", "format", "avro", "group", c.avroGroupID)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		msg, err := c.avroReader.FetchMessage(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			// EOF means topic is empty — suppress, just wait for messages
-			if err == io.EOF || err.Error() == "fetching message: EOF" {
-				continue
-			}
-			slog.Error("kafka fetch error",
-				"format", "avro",
-				"group", c.avroGroupID,
-				"error", err,
-			)
-			continue
-		}
-
-		slog.Info("kafka fetch",
-			"format", "avro",
-			"group", c.avroGroupID,
-			"topic", msg.Topic,
-			"partition", msg.Partition,
-			"offset", msg.Offset,
-			"key", string(msg.Key),
-		)
-
-		event, err := c.deserializeAvro(msg.Value)
-		if err != nil {
-			slog.Error("kafka deserialize error",
-				"format", "avro",
-				"group", c.avroGroupID,
-				"topic", msg.Topic,
-				"partition", msg.Partition,
-				"offset", msg.Offset,
-				"key", string(msg.Key),
-				"error", err,
-			)
-			// Offset is not committed. Within this live session kafka-go's
-			// fetch cursor has already advanced, so the next FetchMessage call
-			// will return the following message. The failed message is only
-			// re-delivered after a restart, when the broker's uncommitted offset
-			// is used to resume (poison-pill until DLQ is added in Step 3).
-			// A 1 s back-off prevents a tight CPU spin in the meantime.
-			select {
-			case <-time.After(1 * time.Second):
-			case <-ctx.Done():
-				continue
-			}
-			continue
-		}
-
-		meta := MessageMeta{
-			Topic:         msg.Topic,
-			Partition:     msg.Partition,
-			Offset:        msg.Offset,
-			ConsumerGroup: c.avroGroupID,
-		}
-
-		if err := handler(ctx, meta, event); err != nil {
-			slog.Error("kafka handler error",
-				"format", "avro",
-				"group", c.avroGroupID,
-				"topic", msg.Topic,
-				"partition", msg.Partition,
-				"offset", msg.Offset,
-				"key", string(msg.Key),
-				"error", err,
-			)
-			// offset not committed — message will be re-read after restart
-			continue
-		}
-
-		if err := c.avroReader.CommitMessages(ctx, msg); err != nil {
-			slog.Error("kafka commit error",
-				"format", "avro",
-				"group", c.avroGroupID,
-				"topic", msg.Topic,
-				"partition", msg.Partition,
-				"offset", msg.Offset,
-				"key", string(msg.Key),
-				"error", err,
-			)
-			// The broker's committed offset has not moved. The message will be
-			// re-delivered after a restart (at-least-once). Within this live
-			// session the reader's internal fetch position has already advanced,
-			// so the message will not be retried until the next process start.
-			continue
-		}
-
-		slog.Info("kafka commit",
-			"format", "avro",
-			"group", c.avroGroupID,
-			"topic", msg.Topic,
-			"partition", msg.Partition,
-			"offset", msg.Offset,
-			"key", string(msg.Key),
-		)
-	}
+func newReader(brokers []string, groupID, topic string) *kafkago.Reader {
+	return kafkago.NewReader(kafkago.ReaderConfig{
+		Brokers:        brokers,
+		Topic:          topic,
+		GroupID:        groupID,
+		MinBytes:       1,
+		MaxBytes:       10e6,
+		MaxWait:        time.Second,
+		CommitInterval: 0, // no background auto-commit; offsets are committed after handler success
+	})
 }
 
-func (c *consumer) StartProto(ctx context.Context, handler EventHandler) error {
-	slog.Info("kafka consumer starting", "format", "proto", "group", c.protoGroupID)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		msg, err := c.protoReader.FetchMessage(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			// EOF means topic is empty — suppress, just wait for messages
-			if err == io.EOF || err.Error() == "fetching message: EOF" {
-				continue
-			}
-			slog.Error("kafka fetch error",
-				"format", "proto",
-				"group", c.protoGroupID,
-				"error", err,
-			)
-			continue
-		}
-
-		slog.Info("kafka fetch",
-			"format", "proto",
-			"group", c.protoGroupID,
-			"topic", msg.Topic,
-			"partition", msg.Partition,
-			"offset", msg.Offset,
-			"key", string(msg.Key),
-		)
-
-		event, err := c.deserializeProto(msg.Value)
-		if err != nil {
-			slog.Error("kafka deserialize error",
-				"format", "proto",
-				"group", c.protoGroupID,
-				"topic", msg.Topic,
-				"partition", msg.Partition,
-				"offset", msg.Offset,
-				"key", string(msg.Key),
-				"error", err,
-			)
-			// Offset is not committed. Within this live session kafka-go's
-			// fetch cursor has already advanced, so the next FetchMessage call
-			// will return the following message. The failed message is only
-			// re-delivered after a restart, when the broker's uncommitted offset
-			// is used to resume (poison-pill until DLQ is added in Step 3).
-			// A 1 s back-off prevents a tight CPU spin in the meantime.
-			select {
-			case <-time.After(1 * time.Second):
-			case <-ctx.Done():
-				continue
-			}
-			continue
-		}
-
-		meta := MessageMeta{
-			Topic:         msg.Topic,
-			Partition:     msg.Partition,
-			Offset:        msg.Offset,
-			ConsumerGroup: c.protoGroupID,
-		}
-
-		if err := handler(ctx, meta, event); err != nil {
-			slog.Error("kafka handler error",
-				"format", "proto",
-				"group", c.protoGroupID,
-				"topic", msg.Topic,
-				"partition", msg.Partition,
-				"offset", msg.Offset,
-				"key", string(msg.Key),
-				"error", err,
-			)
-			// offset not committed — message will be re-read after restart
-			continue
-		}
-
-		if err := c.protoReader.CommitMessages(ctx, msg); err != nil {
-			slog.Error("kafka commit error",
-				"format", "proto",
-				"group", c.protoGroupID,
-				"topic", msg.Topic,
-				"partition", msg.Partition,
-				"offset", msg.Offset,
-				"key", string(msg.Key),
-				"error", err,
-			)
-			// The broker's committed offset has not moved. The message will be
-			// re-delivered after a restart (at-least-once). Within this live
-			// session the reader's internal fetch position has already advanced,
-			// so the message will not be retried until the next process start.
-			continue
-		}
-
-		slog.Info("kafka commit",
-			"format", "proto",
-			"group", c.protoGroupID,
-			"topic", msg.Topic,
-			"partition", msg.Partition,
-			"offset", msg.Offset,
-			"key", string(msg.Key),
-		)
-	}
-}
-
-func (c *consumer) deserializeAvro(data []byte) (*models.UserEvent, error) {
-	if len(data) < 5 {
-		return nil, fmt.Errorf("invalid confluent wire format: too short")
-	}
-	if data[0] != MagicByte {
-		return nil, fmt.Errorf("invalid magic byte")
-	}
-
-	schemaID := int(binary.BigEndian.Uint32(data[1:5]))
-	schema, err := c.schemaClient.GetSchema(schemaID)
-	if err != nil {
-		return nil, fmt.Errorf("fetch schema %d: %w", schemaID, err)
-	}
-
-	parsedSchema, err := avro.Parse(schema.Schema())
-	if err != nil {
-		return nil, fmt.Errorf("parse avro schema: %w", err)
-	}
-
-	var native map[string]interface{}
-	if err := avro.Unmarshal(parsedSchema, data[5:], &native); err != nil {
-		return nil, fmt.Errorf("avro unmarshal: %w", err)
-	}
-
-	tsMillis, _ := native["timestamp"].(int64)
-
-	// hamba/avro decodes Avro int as int32
-	var age int
-	switch v := native["age"].(type) {
-	case int32:
-		age = int(v)
-	case int64:
-		age = int(v)
-	case int:
-		age = v
-	}
-
-	// event_id has a default of "" for backward compatibility with old messages
-	eventID, _ := native["event_id"].(string)
-
-	return &models.UserEvent{
-		EventID:   eventID,
-		EventType: native["event_type"].(string),
-		UserID:    native["user_id"].(string),
-		Name:      native["name"].(string),
-		Email:     native["email"].(string),
-		Age:       age,
-		Timestamp: time.UnixMilli(tsMillis),
-	}, nil
-}
-
-// deserializeProto decodes a Confluent-prefixed JSON payload into a UserEvent.
-func (c *consumer) deserializeProto(data []byte) (*models.UserEvent, error) {
-	if len(data) < 5 {
-		return nil, fmt.Errorf("invalid confluent wire format: too short")
-	}
-	if data[0] != MagicByte {
-		return nil, fmt.Errorf("invalid magic byte")
-	}
-
-	var pbEvent pb.UserEvent
-	if err := json.Unmarshal(data[5:], &pbEvent); err != nil {
-		return nil, fmt.Errorf("proto json unmarshal: %w", err)
-	}
-
-	return &models.UserEvent{
-		EventID:   pbEvent.EventId,
-		EventType: pbEvent.EventType.String(),
-		UserID:    pbEvent.UserId,
-		Name:      pbEvent.Name,
-		Email:     pbEvent.Email,
-		Age:       pbEvent.Age,
-		Timestamp: pbEvent.Timestamp,
-	}, nil
-}
+func (c *consumer) StartAvro(ctx context.Context, h EventHandler) error  { return c.avro.run(ctx, h) }
+func (c *consumer) StartProto(ctx context.Context, h EventHandler) error { return c.proto.run(ctx, h) }
 
 func (c *consumer) Close() error {
-	return errors.Join(c.avroReader.Close(), c.protoReader.Close())
+	return errors.Join(c.avro.reader.Close(), c.proto.reader.Close())
+}
+
+// run consumes until ctx is cancelled. Delivery is at-least-once: the offset is
+// committed only after the handler returns nil.
+//
+// A message that fails to decode or handle is not committed and is skipped for
+// the rest of this process (kafka-go's fetch cursor has already advanced); it is
+// re-delivered after a restart from the last committed offset. Retrying in place
+// or parking it in a dead-letter topic is not implemented yet.
+func (t *topicConsumer) run(ctx context.Context, handler EventHandler) error {
+	log := slog.With("format", t.format, "group", t.groupID)
+	log.Info("kafka consumer starting")
+
+	for {
+		msg, err := t.reader.FetchMessage(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, io.EOF) {
+				continue // empty topic or closed idle connection; keep polling
+			}
+			log.Error("kafka fetch error", "error", err)
+			if !sleep(ctx, t.backoff) {
+				return ctx.Err()
+			}
+			continue
+		}
+
+		mlog := log.With(
+			"topic", msg.Topic,
+			"partition", msg.Partition,
+			"offset", msg.Offset,
+			"key", string(msg.Key),
+		)
+		mlog.Debug("kafka fetch")
+
+		event, err := t.decode(msg.Value)
+		if err != nil {
+			mlog.Error("kafka deserialize error", "error", err)
+			if !sleep(ctx, t.backoff) { // avoid a hot loop on a run of bad messages
+				return ctx.Err()
+			}
+			continue
+		}
+
+		meta := MessageMeta{
+			Topic:         msg.Topic,
+			Partition:     msg.Partition,
+			Offset:        msg.Offset,
+			ConsumerGroup: t.groupID,
+		}
+		if err := handler(ctx, meta, event); err != nil {
+			mlog.Error("kafka handler error", "error", err)
+			continue
+		}
+
+		if err := t.reader.CommitMessages(ctx, msg); err != nil {
+			mlog.Error("kafka commit error", "error", err)
+			continue
+		}
+		mlog.Info("kafka commit")
+	}
+}
+
+// sleep waits for d or until ctx is done; it reports whether the full wait elapsed.
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // LoggingHandler is a simple event handler that logs consumed events.
 func LoggingHandler(format string) EventHandler {
 	return func(ctx context.Context, meta MessageMeta, event *models.UserEvent) error {
-		b, _ := json.MarshalIndent(event, "", "  ")
 		slog.Info("kafka event received",
 			"format", format,
 			"group", meta.ConsumerGroup,
 			"topic", meta.Topic,
 			"partition", meta.Partition,
 			"offset", meta.Offset,
-			"event", string(b),
+			"event_id", event.EventID,
+			"event_type", event.EventType,
+			"user_id", event.UserID,
 		)
 		return nil
 	}

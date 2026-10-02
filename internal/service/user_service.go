@@ -3,14 +3,25 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 
-	"kafka-user-service/internal/kafka"
-	"kafka-user-service/internal/models"
-	"kafka-user-service/internal/repository"
+	"github.com/tommitoan/kafka-user-service/internal/kafka"
+	"github.com/tommitoan/kafka-user-service/internal/models"
+	"github.com/tommitoan/kafka-user-service/internal/repository"
+)
+
+const (
+	defaultListLimit = 20
+	maxListLimit     = 100
+)
+
+// Errors surfaced to the API layer.
+var (
+	ErrNotFound   = repository.ErrNotFound
+	ErrEmailTaken = repository.ErrEmailTaken
 )
 
 type CreateUserRequest struct {
@@ -19,10 +30,12 @@ type CreateUserRequest struct {
 	Age   int    `json:"age"   binding:"gte=0,lte=150"`
 }
 
+// UpdateUserRequest is a partial update: omitted (nil) fields are left unchanged,
+// so a field can be set to its zero value, e.g. {"age": 0}.
 type UpdateUserRequest struct {
-	Name  string `json:"name"`
-	Email string `json:"email" binding:"omitempty,email"`
-	Age   int    `json:"age"   binding:"omitempty,gte=0,lte=150"`
+	Name  *string `json:"name"  binding:"omitempty,min=1"`
+	Email *string `json:"email" binding:"omitempty,email"`
+	Age   *int    `json:"age"   binding:"omitempty,gte=0,lte=150"`
 }
 
 type ListUsersResponse struct {
@@ -32,7 +45,6 @@ type ListUsersResponse struct {
 	Limit  int            `json:"limit"`
 }
 
-//go:generate mockery --name=UserService --output=../mocks --outpkg=mocks
 type UserService interface {
 	Create(ctx context.Context, req CreateUserRequest) (*models.User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
@@ -51,11 +63,7 @@ func NewUserService(repo repository.UserRepository, producer kafka.Producer) Use
 }
 
 func (s *userService) Create(ctx context.Context, req CreateUserRequest) (*models.User, error) {
-	user := &models.User{
-		Name:  req.Name,
-		Email: req.Email,
-		Age:   req.Age,
-	}
+	user := &models.User{Name: req.Name, Email: req.Email, Age: req.Age}
 
 	if err := s.repo.Create(ctx, user); err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
@@ -68,20 +76,20 @@ func (s *userService) Create(ctx context.Context, req CreateUserRequest) (*model
 func (s *userService) GetByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
 	user, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, ErrNotFound
-		}
 		return nil, fmt.Errorf("get user: %w", err)
 	}
 	return user, nil
 }
 
 func (s *userService) List(ctx context.Context, offset, limit int) (*ListUsersResponse, error) {
-	if limit <= 0 {
-		limit = 20
+	if offset < 0 {
+		offset = 0
 	}
-	if limit > 100 {
-		limit = 100
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
 	}
 
 	users, total, err := s.repo.List(ctx, offset, limit)
@@ -89,31 +97,23 @@ func (s *userService) List(ctx context.Context, offset, limit int) (*ListUsersRe
 		return nil, fmt.Errorf("list users: %w", err)
 	}
 
-	return &ListUsersResponse{
-		Users:  users,
-		Total:  total,
-		Offset: offset,
-		Limit:  limit,
-	}, nil
+	return &ListUsersResponse{Users: users, Total: total, Offset: offset, Limit: limit}, nil
 }
 
 func (s *userService) Update(ctx context.Context, id uuid.UUID, req UpdateUserRequest) (*models.User, error) {
 	user, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, ErrNotFound
-		}
 		return nil, fmt.Errorf("get user for update: %w", err)
 	}
 
-	if req.Name != "" {
-		user.Name = req.Name
+	if req.Name != nil {
+		user.Name = *req.Name
 	}
-	if req.Email != "" {
-		user.Email = req.Email
+	if req.Email != nil {
+		user.Email = *req.Email
 	}
-	if req.Age != 0 {
-		user.Age = req.Age
+	if req.Age != nil {
+		user.Age = *req.Age
 	}
 
 	if err := s.repo.Update(ctx, user); err != nil {
@@ -127,9 +127,6 @@ func (s *userService) Update(ctx context.Context, id uuid.UUID, req UpdateUserRe
 func (s *userService) Delete(ctx context.Context, id uuid.UUID) error {
 	user, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return ErrNotFound
-		}
 		return fmt.Errorf("get user for delete: %w", err)
 	}
 
@@ -141,9 +138,14 @@ func (s *userService) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// publishEvent emits a user event after the database write has committed.
+//
+// This is a dual write (DB, then Kafka) without an outbox: if the publish fails
+// the change is persisted but no event is sent. The failure is logged, not
+// returned, so the HTTP response still reflects the committed state.
 func (s *userService) publishEvent(ctx context.Context, user *models.User, evtType models.EventType) {
 	event := &models.UserEvent{
-		EventID:   uuid.New().String(), // generated once; stable across at-least-once redelivery
+		EventID:   uuid.NewString(), // generated once; stable across at-least-once redelivery
 		EventType: string(evtType),
 		UserID:    user.ID.String(),
 		Name:      user.Name,
@@ -151,8 +153,8 @@ func (s *userService) publishEvent(ctx context.Context, user *models.User, evtTy
 		Age:       user.Age,
 		Timestamp: time.Now().UTC(),
 	}
-	// Fire-and-forget; log errors in real apps
-	_ = s.producer.PublishUserEvent(ctx, event)
+	if err := s.producer.PublishUserEvent(ctx, event); err != nil {
+		slog.Error("publish user event failed",
+			"event_id", event.EventID, "event_type", evtType, "user_id", event.UserID, "error", err)
+	}
 }
-
-var ErrNotFound = fmt.Errorf("not found")

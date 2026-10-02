@@ -8,12 +8,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"gorm.io/gorm"
 
-	"kafka-user-service/internal/mocks"
-	"kafka-user-service/internal/models"
-	"kafka-user-service/internal/service"
+	"github.com/tommitoan/kafka-user-service/internal/mocks"
+	"github.com/tommitoan/kafka-user-service/internal/models"
+	"github.com/tommitoan/kafka-user-service/internal/repository"
+	"github.com/tommitoan/kafka-user-service/internal/service"
 )
+
+func ptr[T any](v T) *T { return &v }
 
 func newTestUser() *models.User {
 	return &models.User{
@@ -91,7 +93,7 @@ func TestUserService_GetByID_NotFound(t *testing.T) {
 	prod := &mocks.MockProducer{}
 
 	id := uuid.New()
-	repo.On("GetByID", mock.Anything, id).Return(nil, gorm.ErrRecordNotFound)
+	repo.On("GetByID", mock.Anything, id).Return(nil, repository.ErrNotFound)
 
 	svc := service.NewUserService(repo, prod)
 	got, err := svc.GetByID(context.Background(), id)
@@ -162,7 +164,7 @@ func TestUserService_Update_Success(t *testing.T) {
 
 	svc := service.NewUserService(repo, prod)
 	updated, err := svc.Update(context.Background(), existing.ID, service.UpdateUserRequest{
-		Name: "Alice Updated",
+		Name: ptr("Alice Updated"),
 	})
 
 	assert.NoError(t, err)
@@ -176,10 +178,10 @@ func TestUserService_Update_NotFound(t *testing.T) {
 	prod := &mocks.MockProducer{}
 
 	id := uuid.New()
-	repo.On("GetByID", mock.Anything, id).Return(nil, gorm.ErrRecordNotFound)
+	repo.On("GetByID", mock.Anything, id).Return(nil, repository.ErrNotFound)
 
 	svc := service.NewUserService(repo, prod)
-	_, err := svc.Update(context.Background(), id, service.UpdateUserRequest{Name: "X"})
+	_, err := svc.Update(context.Background(), id, service.UpdateUserRequest{Name: ptr("X")})
 
 	assert.ErrorIs(t, err, service.ErrNotFound)
 	prod.AssertNotCalled(t, "PublishUserEvent")
@@ -209,11 +211,91 @@ func TestUserService_Delete_NotFound(t *testing.T) {
 	prod := &mocks.MockProducer{}
 
 	id := uuid.New()
-	repo.On("GetByID", mock.Anything, id).Return(nil, gorm.ErrRecordNotFound)
+	repo.On("GetByID", mock.Anything, id).Return(nil, repository.ErrNotFound)
 
 	svc := service.NewUserService(repo, prod)
 	err := svc.Delete(context.Background(), id)
 
 	assert.ErrorIs(t, err, service.ErrNotFound)
 	prod.AssertNotCalled(t, "PublishUserEvent")
+}
+
+// ── Additional behaviours ─────────────────────────────────────────────────────
+
+func TestUserService_Create_EmailTaken(t *testing.T) {
+	repo := &mocks.MockUserRepository{}
+	prod := &mocks.MockProducer{}
+	repo.On("Create", mock.Anything, mock.Anything).Return(repository.ErrEmailTaken)
+
+	svc := service.NewUserService(repo, prod)
+	_, err := svc.Create(context.Background(), service.CreateUserRequest{Name: "A", Email: "a@example.com"})
+
+	assert.ErrorIs(t, err, service.ErrEmailTaken)
+	prod.AssertNotCalled(t, "PublishUserEvent")
+}
+
+// A publish failure is logged but must not fail a request whose DB write committed.
+func TestUserService_Create_PublishFailureIsNotFatal(t *testing.T) {
+	repo := &mocks.MockUserRepository{}
+	prod := &mocks.MockProducer{}
+	repo.On("Create", mock.Anything, mock.Anything).Return(nil)
+	prod.On("PublishUserEvent", mock.Anything, mock.Anything).Return(assert.AnError)
+
+	svc := service.NewUserService(repo, prod)
+	user, err := svc.Create(context.Background(), service.CreateUserRequest{Name: "A", Email: "a@example.com"})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, user)
+	prod.AssertExpectations(t)
+}
+
+func TestUserService_Create_EventCarriesStableFields(t *testing.T) {
+	repo := &mocks.MockUserRepository{}
+	prod := &mocks.MockProducer{}
+	repo.On("Create", mock.Anything, mock.Anything).Return(nil)
+
+	var got *models.UserEvent
+	prod.On("PublishUserEvent", mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) { got = args.Get(1).(*models.UserEvent) }).
+		Return(nil)
+
+	svc := service.NewUserService(repo, prod)
+	user, err := svc.Create(context.Background(), service.CreateUserRequest{Name: "A", Email: "a@example.com"})
+	assert.NoError(t, err)
+
+	_, parseErr := uuid.Parse(got.EventID)
+	assert.NoError(t, parseErr, "event_id must be a UUID")
+	assert.Equal(t, string(models.EventCreated), got.EventType)
+	assert.Equal(t, user.ID.String(), got.UserID)
+}
+
+// Pointer fields let a caller set a value to its zero value.
+func TestUserService_Update_CanSetAgeToZero(t *testing.T) {
+	repo := &mocks.MockUserRepository{}
+	prod := &mocks.MockProducer{}
+
+	existing := newTestUser()
+	existing.Age = 30
+	repo.On("GetByID", mock.Anything, existing.ID).Return(existing, nil)
+	repo.On("Update", mock.Anything, mock.Anything).Return(nil)
+	prod.On("PublishUserEvent", mock.Anything, mock.Anything).Return(nil)
+
+	svc := service.NewUserService(repo, prod)
+	updated, err := svc.Update(context.Background(), existing.ID, service.UpdateUserRequest{Age: ptr(0)})
+
+	assert.NoError(t, err)
+	assert.Equal(t, 0, updated.Age)
+	assert.Equal(t, "Alice", updated.Name, "omitted fields stay unchanged")
+}
+
+func TestUserService_List_NegativeOffsetClamped(t *testing.T) {
+	repo := &mocks.MockUserRepository{}
+	repo.On("List", mock.Anything, 0, 20).Return([]*models.User{}, int64(0), nil)
+
+	svc := service.NewUserService(repo, &mocks.MockProducer{})
+	resp, err := svc.List(context.Background(), -5, 20)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Offset)
+	repo.AssertExpectations(t)
 }

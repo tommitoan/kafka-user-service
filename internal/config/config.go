@@ -2,6 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -34,12 +37,17 @@ func (d DatabaseConfig) DSN() string {
 	)
 }
 
-// MigrateURL returns a URL-style DSN required by golang-migrate.
+// MigrateURL returns a URL-style DSN required by golang-migrate. Credentials are
+// percent-encoded, so passwords containing characters such as '@' or '/' are safe.
 func (d DatabaseConfig) MigrateURL() string {
-	return fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		d.User, d.Password, d.Host, d.Port, d.Name, d.SSLMode,
-	)
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(d.User, d.Password),
+		Host:     net.JoinHostPort(d.Host, strconv.Itoa(d.Port)),
+		Path:     "/" + d.Name,
+		RawQuery: url.Values{"sslmode": {d.SSLMode}}.Encode(),
+	}
+	return u.String()
 }
 
 type KafkaConfig struct {
@@ -70,7 +78,7 @@ func Load(path string) (*Config, error) {
 	v.AutomaticEnv()
 
 	v.SetDefault("server.host", "0.0.0.0")
-	v.SetDefault("server.port", 8080)
+	v.SetDefault("server.port", 8085)
 	v.SetDefault("database.host", "localhost")
 	v.SetDefault("database.port", 5432)
 	v.SetDefault("database.user", "postgres")
@@ -81,7 +89,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("kafka.group_id", "user-service")
 	v.SetDefault("kafka.schema_registry", "http://localhost:8081")
 	v.SetDefault("kafka.topics", []map[string]interface{}{
-		{"name": "com.br4.user.core.event.avro",  "num_partitions": 3, "replication_factor": 1},
+		{"name": "com.br4.user.core.event.avro", "num_partitions": 3, "replication_factor": 1},
 		{"name": "com.br4.user.core.event.proto", "num_partitions": 3, "replication_factor": 1},
 	})
 

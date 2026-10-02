@@ -1,67 +1,55 @@
-.PHONY: help test test-integration build proto-gen proto-gen-check
+.PHONY: help up down demo run build test test-integration cover vet fmt lint swagger proto-gen
 
-# ── default ──────────────────────────────────────────────────────────────────
-help:
-	@echo "Available targets:"
-	@echo "  make test              run unit tests"
-	@echo "  make test-integration  run integration tests (requires embedded Postgres)"
-	@echo "  make build             compile the server binary"
-	@echo "  make proto-gen         regenerate proto/user_event.pb.go from .proto"
-	@echo "                         WARNING: read the proto-gen target comments first"
-	@echo "  make proto-gen-check   check that protoc and plugins are installed"
+GO ?= go
+export GOTOOLCHAIN ?= auto
 
-# ── tests ─────────────────────────────────────────────────────────────────────
-test:
-	GOTOOLCHAIN=auto go test ./...
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "} {printf "  make %-18s %s\n", $$1, $$2}'
 
-test-integration:
-	GOTOOLCHAIN=auto go test -tags=integration -v ./test/integration/... -timeout 180s
+# ── infrastructure ───────────────────────────────────────────────────────────
+up: ## Start Kafka, Schema Registry, Kafka UI and Postgres
+	docker compose up -d --wait
 
-# ── build ─────────────────────────────────────────────────────────────────────
-build:
-	GOTOOLCHAIN=auto go build -o bin/server ./cmd/server
+down: ## Stop the stack and delete its volumes
+	docker compose down -v
 
-# ── proto ─────────────────────────────────────────────────────────────────────
-#
-# !! WARNING !!
-# proto/user_event.pb.go is hand-maintained, NOT a clean protoc output.
-# Running this target will OVERWRITE the file with protoc output and REMOVE:
-#   - the DO NOT REGENERATE header
-#   - the EventId field (field 7, json_name "event_id")
-#
-# After running proto-gen you MUST manually:
-#   1. Re-add the DO NOT REGENERATE header block at the top of the file.
-#   2. Re-add EventId to the UserEvent struct:
-#        EventId string `json:"event_id"`
-#   3. Verify `go build ./...` and `make test-integration` still pass.
-#
-# Protoc setup (one-time):
-#   brew install protobuf                        # or: apt install protobuf-compiler
-#   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-#   export PATH="$PATH:$(go env GOPATH)/bin"
-#
-proto-gen-check:
-	@which protoc        > /dev/null 2>&1 || (echo "ERROR: protoc not found. Install protobuf-compiler." && exit 1)
-	@which protoc-gen-go > /dev/null 2>&1 || (echo "ERROR: protoc-gen-go not found. Run: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest" && exit 1)
-	@echo "protoc and protoc-gen-go found."
+demo: ## Build and start the whole stack, service included
+	docker compose --profile app up -d --build --wait
 
-proto-gen: proto-gen-check
-	@echo ""
-	@echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-	@echo "!! WARNING: proto/user_event.pb.go is hand-maintained.       !!"
-	@echo "!! After this runs you MUST re-add EventId (field 7) and     !!"
-	@echo "!! the DO NOT REGENERATE header. See Makefile comments.      !!"
-	@echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-	@echo ""
-	@echo "Proceeding in 5 seconds... (Ctrl-C to abort)"
-	@sleep 5
-	protoc \
-		--proto_path=proto \
-		--go_out=proto \
-		--go_opt=paths=source_relative \
-		proto/user_event.proto
-	@echo ""
-	@echo "Done. Now manually:"
-	@echo "  1. Re-add the DO NOT REGENERATE header to proto/user_event.pb.go"
-	@echo "  2. Re-add: EventId string \`json:\"event_id\"\` to the UserEvent struct"
-	@echo "  3. Run: make test-integration"
+# ── app ──────────────────────────────────────────────────────────────────────
+run: ## Run the service against the local stack (make up first)
+	$(GO) run ./cmd/server
+
+build: ## Compile the server binary into bin/
+	$(GO) build -o bin/server ./cmd/server
+
+# ── quality ──────────────────────────────────────────────────────────────────
+test: ## Unit tests with the race detector
+	$(GO) test -race ./...
+
+test-integration: ## HTTP + idempotency tests against embedded Postgres (no Docker needed)
+	$(GO) test -tags=integration -timeout 300s ./test/integration/...
+
+cover: ## Unit test coverage summary
+	$(GO) test -coverprofile=coverage.out ./internal/...
+	$(GO) tool cover -func=coverage.out | tail -1
+
+vet: ## go vet, including the integration-tagged files
+	$(GO) vet ./...
+	$(GO) vet -tags=integration ./...
+
+fmt: ## Format all Go files
+	gofmt -w .
+
+lint: vet ## vet + staticcheck (if installed) + gofmt check
+	@command -v staticcheck >/dev/null && staticcheck ./... || echo "staticcheck not installed, skipped"
+	@test -z "$$(gofmt -l .)" || (echo "gofmt needed on:"; gofmt -l .; exit 1)
+
+# ── code generation ──────────────────────────────────────────────────────────
+swagger: ## Regenerate docs/ (OpenAPI) from handler annotations
+	$(GO) run github.com/swaggo/swag/cmd/swag@v1.16.3 init -g internal/api/docs.go -o docs --parseInternal
+
+proto-gen: ## Regenerate proto/user_event.pb.go (needs protoc + protoc-gen-go)
+	@command -v protoc >/dev/null || (echo "protoc not found: brew install protobuf | apt install protobuf-compiler" && exit 1)
+	@command -v protoc-gen-go >/dev/null || (echo "protoc-gen-go not found: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest" && exit 1)
+	protoc --proto_path=proto --go_out=proto --go_opt=paths=source_relative proto/user_event.proto

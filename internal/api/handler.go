@@ -2,13 +2,14 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"kafka-user-service/internal/service"
+	"github.com/tommitoan/kafka-user-service/internal/service"
 )
 
 type UserHandler struct {
@@ -46,6 +47,7 @@ func (h *UserHandler) RegisterRoutes(r *gin.Engine) {
 // @Param        user  body      service.CreateUserRequest  true  "User payload"
 // @Success      201   {object}  models.User
 // @Failure      400   {object}  map[string]string
+// @Failure      409   {object}  map[string]string
 // @Failure      500   {object}  map[string]string
 // @Router       /users [post]
 func (h *UserHandler) CreateUser(c *gin.Context) {
@@ -57,7 +59,7 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 
 	user, err := h.svc.Create(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, errorResponse(err))
+		respondError(c, err)
 		return
 	}
 
@@ -82,11 +84,7 @@ func (h *UserHandler) GetUser(c *gin.Context) {
 
 	user, err := h.svc.GetByID(c.Request.Context(), id)
 	if err != nil {
-		if errors.Is(err, service.ErrNotFound) {
-			c.JSON(http.StatusNotFound, errorResponse(err))
-			return
-		}
-		c.JSON(http.StatusInternalServerError, errorResponse(err))
+		respondError(c, err)
 		return
 	}
 
@@ -101,15 +99,24 @@ func (h *UserHandler) GetUser(c *gin.Context) {
 // @Param        offset  query     int  false  "Offset"  default(0)
 // @Param        limit   query     int  false  "Limit"   default(20)
 // @Success      200     {object}  service.ListUsersResponse
+// @Failure      400     {object}  map[string]string
 // @Failure      500     {object}  map[string]string
 // @Router       /users [get]
 func (h *UserHandler) ListUsers(c *gin.Context) {
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "offset must be an integer"})
+		return
+	}
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be an integer"})
+		return
+	}
 
 	resp, err := h.svc.List(c.Request.Context(), offset, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, errorResponse(err))
+		respondError(c, err)
 		return
 	}
 
@@ -127,6 +134,7 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 // @Success      200   {object}  models.User
 // @Failure      400   {object}  map[string]string
 // @Failure      404   {object}  map[string]string
+// @Failure      409   {object}  map[string]string
 // @Failure      500   {object}  map[string]string
 // @Router       /users/{id} [put]
 func (h *UserHandler) UpdateUser(c *gin.Context) {
@@ -143,11 +151,7 @@ func (h *UserHandler) UpdateUser(c *gin.Context) {
 
 	user, err := h.svc.Update(c.Request.Context(), id, req)
 	if err != nil {
-		if errors.Is(err, service.ErrNotFound) {
-			c.JSON(http.StatusNotFound, errorResponse(err))
-			return
-		}
-		c.JSON(http.StatusInternalServerError, errorResponse(err))
+		respondError(c, err)
 		return
 	}
 
@@ -170,15 +174,11 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 	}
 
 	if err := h.svc.Delete(c.Request.Context(), id); err != nil {
-		if errors.Is(err, service.ErrNotFound) {
-			c.JSON(http.StatusNotFound, errorResponse(err))
-			return
-		}
-		c.JSON(http.StatusInternalServerError, errorResponse(err))
+		respondError(c, err)
 		return
 	}
 
-	c.JSON(http.StatusNoContent, nil)
+	c.Status(http.StatusNoContent)
 }
 
 // --- helpers ---
@@ -194,4 +194,18 @@ func parseUUID(c *gin.Context, param string) (uuid.UUID, error) {
 
 func errorResponse(err error) gin.H {
 	return gin.H{"error": err.Error()}
+}
+
+// respondError maps service errors to HTTP statuses. Unexpected errors are logged
+// and reported as a generic 500 so internal details never reach the client.
+func respondError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, service.ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+	case errors.Is(err, service.ErrEmailTaken):
+		c.JSON(http.StatusConflict, gin.H{"error": "email already in use"})
+	default:
+		slog.Error("request failed", "method", c.Request.Method, "path", c.FullPath(), "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+	}
 }

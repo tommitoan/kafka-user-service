@@ -15,13 +15,11 @@ import (
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"kafka-user-service/internal/db"
-	"kafka-user-service/internal/kafka"
-	"kafka-user-service/internal/models"
+	"github.com/tommitoan/kafka-user-service/internal/db"
+	"github.com/tommitoan/kafka-user-service/internal/kafka"
+	"github.com/tommitoan/kafka-user-service/internal/models"
 )
 
 // TestIdempotentHandler_DeduplicatesOnSameEventID proves that:
@@ -40,9 +38,7 @@ func TestIdempotentHandler_DeduplicatesOnSameEventID(t *testing.T) {
 	defer func() { _ = pg.Stop() }()
 
 	dsn := "host=localhost port=15433 user=postgres password=postgres dbname=idempotentdb sslmode=disable"
-	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
+	gormDB, err := db.Open(dsn, logger.Silent)
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(gormDB))
 
@@ -102,9 +98,7 @@ func TestIdempotentHandler_IndependentPerTopic(t *testing.T) {
 	defer func() { _ = pg.Stop() }()
 
 	dsn := "host=localhost port=15434 user=postgres password=postgres dbname=idempotentdb2 sslmode=disable"
-	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
+	gormDB, err := db.Open(dsn, logger.Silent)
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(gormDB))
 
@@ -167,9 +161,7 @@ func TestIdempotentHandler_MissingEventID(t *testing.T) {
 	defer func() { _ = pg.Stop() }()
 
 	dsn := "host=localhost port=15435 user=postgres password=postgres dbname=idempotentdb3 sslmode=disable"
-	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
+	gormDB, err := db.Open(dsn, logger.Silent)
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(gormDB))
 
@@ -211,9 +203,7 @@ func TestIdempotentHandler_InnerErrorRollsBackDedup(t *testing.T) {
 	defer func() { _ = pg.Stop() }()
 
 	dsn := "host=localhost port=15436 user=postgres password=postgres dbname=idempotentdb4 sslmode=disable"
-	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
+	gormDB, err := db.Open(dsn, logger.Silent)
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(gormDB))
 

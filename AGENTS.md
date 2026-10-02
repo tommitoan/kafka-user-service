@@ -21,8 +21,8 @@ The implementation order for this repo is:
 6. real Kafka end-to-end integration tests
 
 ## Repo Facts
-- `internal/kafka/consumer.go` currently uses `ReadMessage()`.
-- `internal/service/user_service.go` currently does DB write then fire-and-forget publish.
+- `internal/kafka/consumer.go` uses `FetchMessage()` / `CommitMessages()` (manual commit) and is idempotent via `processed_events`.
+- `internal/service/user_service.go` writes to the DB, then publishes; a publish failure is logged, not returned (no outbox yet).
 - `test/integration/user_integration_test.go` currently mocks Kafka producer.
 - Preserve dual topic flow unless there is a strong reason to simplify.
 - Keep external minimal compose vs repo-local compose distinction explicit.
